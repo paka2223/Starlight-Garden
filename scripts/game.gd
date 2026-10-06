@@ -46,6 +46,12 @@ var week_tasks: Array[String] = ["academy", "atelier", "training", "rest"]
 var selected_action: String = "academy"
 var gold: int = 420
 var stats: Dictionary = {"건강": 72, "체력": 36, "지식": 42, "마력": 24, "예술": 38, "매력": 45, "도덕": 55, "스트레스": 18}
+var fatigue: int = 18
+var family_bond: int = 40
+var friendship: int = 12
+var reputation: int = 0
+var skill_xp: Dictionary = {"학문": 0, "예술": 0, "검술": 0, "서비스": 0, "약초": 0, "탐험": 0}
+var keepsakes: Array[String] = ["별무늬 손수건"]
 var log_lines: Array[String] = []
 var stat_labels: Dictionary = {}
 var date_label: Label
@@ -67,6 +73,12 @@ var event_art: TextureRect
 var event_caption: Label
 var daily_button: Button
 var month_title_label: Label
+var condition_label: Label
+var bond_label: Label
+var skill_label: Label
+var keepsake_button: Button
+var choice_container: VBoxContainer
+var event_pending: bool = false
 
 func _ready() -> void:
 	_build_ui()
@@ -203,6 +215,13 @@ func _start_new_game() -> void:
 	gold += fortune_number * 5
 	month_index = 0
 	day_of_month = 1
+	fatigue = 12
+	family_bond = 45
+	friendship = 12
+	reputation = 0
+	skill_xp = {"학문": 0, "예술": 0, "검술": 0, "서비스": 0, "약초": 0, "탐험": 0}
+	keepsakes = ["별무늬 손수건"]
+	event_pending = false
 	selected_week = 0
 	week_tasks = ["academy", "atelier", "training", "rest"]
 	selected_action = week_tasks[0]
@@ -266,6 +285,15 @@ func _build_stats_panel(parent: HBoxContainer) -> void:
 		var value_label := _label("%s  0" % key, 15, Color("e1e6ef"))
 		stat_labels[key] = value_label
 		content.add_child(value_label)
+	condition_label = _label("컨디션  82  · 피로 18", 14, Color("9ed2bc"))
+	content.add_child(condition_label)
+	bond_label = _label("가족애 45  · 친구 인연 12  · 명성 0", 13, Color("d8c890"))
+	content.add_child(bond_label)
+	skill_label = _label("숙련  학문 0 · 예술 0 · 검술 0", 12, Color("b9c2d1"))
+	content.add_child(skill_label)
+	keepsake_button = _button("기념품 가방 · 1")
+	keepsake_button.pressed.connect(_show_keepsakes)
+	content.add_child(keepsake_button)
 	var separator := HSeparator.new()
 	content.add_child(separator)
 	content.add_child(_label("이번 달 생활비  35 G", 13, Color("b9c2d1")))
@@ -357,6 +385,9 @@ func _build_story_panel(parent: HBoxContainer) -> void:
 	event_caption.custom_minimum_size.y = 42
 	event_caption.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	content.add_child(event_caption)
+	choice_container = VBoxContainer.new()
+	choice_container.add_theme_constant_override("separation", 5)
+	content.add_child(choice_container)
 	content.add_child(_label("정원의 기록", 16, Color("f4d99a")))
 	var scroll := ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -380,7 +411,7 @@ func _assign_week_action(action_key: String) -> void:
 	_refresh()
 
 func _advance_day() -> void:
-	if month_index >= 96:
+	if month_index >= 96 or event_pending:
 		return
 	var finished_day := day_of_month
 	var finished_week := int((finished_day - 1) / DAYS_PER_WEEK)
@@ -402,8 +433,11 @@ func _advance_day() -> void:
 			_trigger_birthday_event(10 + int(month_index / 12))
 		else:
 			_show_daily_event(week_tasks[int((day_of_month - 1) / DAYS_PER_WEEK)])
-			if day_of_month == 15 and randf() < 0.22:
-				_random_event()
+			if day_of_month == 15:
+				if month_index % 3 == 2:
+					_trigger_competition()
+				else:
+					_random_event()
 	stats["스트레스"] = clampi(int(stats["스트레스"]), 0, 100)
 	stats["건강"] = clampi(int(stats["건강"]), 0, 100)
 	_refresh()
@@ -414,6 +448,7 @@ func _resolve_week(week_index: int) -> void:
 	var weekly_cost := int(ceil(float(action.cost) / WEEKS_PER_MONTH))
 	var before_gold := gold
 	var before_stats: Dictionary = stats.duplicate()
+	var efficiency := 1.0 if fatigue < 55 else maxf(0.45, 1.0 - float(fatigue - 55) * 0.012)
 	_apply_action(action_key)
 	for key in stats.keys():
 		var change := int(stats[key]) - int(before_stats[key])
@@ -421,6 +456,8 @@ func _resolve_week(week_index: int) -> void:
 			var scaled_change := int(round(float(change) / WEEKS_PER_MONTH))
 			if scaled_change == 0:
 				scaled_change = 1 if change > 0 else -1
+			if change > 0:
+				scaled_change = maxi(1, int(floor(float(scaled_change) * efficiency)))
 			stats[key] = int(before_stats[key]) + scaled_change
 	gold = before_gold + int(round(float(gold - before_gold) / WEEKS_PER_MONTH)) - weekly_cost
 	if gold < 0:
@@ -429,11 +466,48 @@ func _resolve_week(week_index: int) -> void:
 		_add_log("%d주차 생활비가 부족해 스트레스가 늘었습니다." % [week_index + 1])
 	else:
 		_add_log("%d주차 · %s 일정을 마쳤습니다." % [week_index + 1, action.title])
+	var skill_name := _skill_for_action(action_key)
+	if not skill_name.is_empty():
+		var old_rank := _skill_rank(skill_name)
+		skill_xp[skill_name] = int(skill_xp.get(skill_name, 0)) + 8 + (2 if efficiency >= 0.9 else 0)
+		if _skill_rank(skill_name) > old_rank:
+			_add_log("%s 숙련 %d단계 달성! 같은 활동의 성장 효과가 높아집니다." % [skill_name, _skill_rank(skill_name)])
+			if _skill_rank(skill_name) == 2:
+				var keepsake := "%s 수료 배지" % skill_name
+				if not keepsakes.has(keepsake):
+					keepsakes.append(keepsake)
+					_add_log("기념품 획득 · %s" % keepsake)
+	var fatigue_change := _fatigue_for_action(action_key)
+	fatigue = clampi(fatigue + fatigue_change, 0, 100)
+	if fatigue >= 80:
+		stats["건강"] = maxi(0, int(stats["건강"]) - 2)
+		_add_log("피로가 쌓여 건강이 2 감소했습니다. 휴식으로 컨디션을 회복하세요.")
 	if not zodiac.is_empty() and String(zodiac.stat) in _affinities_for(action_key):
 		stats[String(zodiac.stat)] = mini(100, int(stats[String(zodiac.stat)]) + 1)
 		_add_log("%s의 별자리 보너스 · %s +1." % [zodiac.name, zodiac.stat])
 	for key in ["건강", "체력", "지식", "마력", "예술", "매력", "도덕", "스트레스"]:
 		stats[key] = clampi(int(stats[key]), 0, 100)
+	_refresh()
+
+func _skill_for_action(action_key: String) -> String:
+	var skills: Dictionary = {"academy": "학문", "atelier": "예술", "training": "검술", "cafe": "서비스", "farm": "약초", "shop": "서비스", "adventure": "탐험"}
+	return String(skills.get(action_key, ""))
+
+func _skill_rank(skill_name: String) -> int:
+	return int(int(skill_xp.get(skill_name, 0)) / 30)
+
+func _fatigue_for_action(action_key: String) -> int:
+	var fatigue_costs: Dictionary = {"academy": 12, "atelier": 10, "training": 18, "cafe": 14, "farm": 15, "shop": 13, "adventure": 20, "rest": -30, "friends": -12}
+	return int(fatigue_costs.get(action_key, 8))
+
+func _show_keepsakes() -> void:
+	var dialog := AcceptDialog.new()
+	dialog.title = "성장 기록과 기념품"
+	dialog.dialog_text = "숙련:\n학문 %d · 예술 %d · 검술 %d · 서비스 %d · 약초 %d · 탐험 %d\n\n기념품:\n%s" % [_skill_rank("학문"), _skill_rank("예술"), _skill_rank("검술"), _skill_rank("서비스"), _skill_rank("약초"), _skill_rank("탐험"), "\n".join(keepsakes)]
+	add_child(dialog)
+	dialog.confirmed.connect(dialog.queue_free)
+	dialog.close_requested.connect(dialog.queue_free)
+	dialog.popup_centered()
 
 func _pay_monthly_living_cost() -> void:
 	gold -= 35
@@ -482,80 +556,192 @@ func _show_daily_event(action_key: String) -> void:
 		event_art.texture = load("res://assets/harin.svg") as Texture2D
 
 func _trigger_birthday_event(age: int) -> void:
-	var birthday_event := randi_range(0, 3)
-	var event_text := ""
-	var scene_name := "birthday"
-	match birthday_event:
-		0:
-			scene_name = "birthday_gift"
-			var allowance := randi_range(60, 120)
-			gold += allowance
-			event_text = "가족이 생일 용돈 %d G를 건넸습니다. 촛불을 끄며 소원을 빌었습니다." % allowance
-		1:
-			scene_name = "birthday_park"
-			gold = maxi(0, gold - 20)
-			stats["스트레스"] = maxi(0, int(stats["스트레스"]) - 15)
-			stats["매력"] = mini(100, int(stats["매력"]) + 2)
-			event_text = "함께 놀이공원에 가서 신나게 놀았습니다. 웃음 가득한 생일이었습니다."
-		2:
-			scene_name = "birthday_trip"
-			gold = maxi(0, gold - 35)
+	event_art.texture = load("res://assets/events/birthday.svg") as Texture2D
+	_present_choices("%d살 생일 · %s의 별빛이 축복합니다. 올해는 어떻게 기념할까요?" % [age, zodiac.get("name", "별빛")], "birthday", [
+		{"label": "용돈을 받아 저축한다 · +80 G", "kind": "birthday_gift"},
+		{"label": "놀이공원 나들이 · 20 G", "kind": "birthday_park", "cost": 20},
+		{"label": "가족과 기차 여행 · 35 G", "kind": "birthday_trip", "cost": 35},
+		{"label": "친구들과 생일 파티 · 무료", "kind": "birthday_party"}
+	])
+	_add_log("%d살 생일이 찾아왔습니다. 기념 방식을 선택하세요." % age)
+
+func _present_choices(title: String, scene_name: String, choices: Array[Dictionary]) -> void:
+	event_pending = true
+	event_caption.text = title
+	var path := "res://assets/events/%s.svg" % scene_name
+	if ResourceLoader.exists(path):
+		event_art.texture = load(path) as Texture2D
+	for child in choice_container.get_children():
+		child.queue_free()
+	for choice in choices:
+		var button := _button(String(choice.label))
+		button.custom_minimum_size.y = 36
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.disabled = gold < int(choice.get("cost", 0))
+		button.pressed.connect(_resolve_choice.bind(choice))
+		choice_container.add_child(button)
+	_refresh()
+
+func _resolve_choice(choice: Dictionary) -> void:
+	var cost := int(choice.get("cost", 0))
+	if gold < cost:
+		return
+	gold -= cost
+	var summary := ""
+	match String(choice.get("kind", "")):
+		"birthday_gift":
+			gold += 80
+			family_bond = mini(100, family_bond + 5)
+			keepsakes.append("%d살 생일 편지" % (10 + int(month_index / 12)))
+			summary = "가족의 편지와 용돈 80 G를 받았습니다. 가족애 +5."
+		"birthday_park":
 			stats["스트레스"] = maxi(0, int(stats["스트레스"]) - 18)
-			stats["건강"] = mini(100, int(stats["건강"]) + 3)
-			event_text = "가족과 기차 여행을 떠났습니다. 바닷바람과 낯선 풍경이 오래 기억에 남습니다."
-		3:
-			scene_name = "birthday_party"
+			stats["매력"] = mini(100, int(stats["매력"]) + 3)
+			friendship = mini(100, friendship + 6)
+			summary = "놀이공원에서 하루를 보냈습니다. 스트레스 -18, 매력 +3, 친구 인연 +6."
+		"birthday_trip":
+			stats["스트레스"] = maxi(0, int(stats["스트레스"]) - 22)
+			stats["건강"] = mini(100, int(stats["건강"]) + 4)
+			family_bond = mini(100, family_bond + 12)
+			summary = "가족 여행의 추억이 생겼습니다. 건강 +4, 가족애 +12."
+		"birthday_party":
+			friendship = mini(100, friendship + 14)
+			stats["매력"] = mini(100, int(stats["매력"]) + 3)
+			stats["스트레스"] = maxi(0, int(stats["스트레스"]) - 12)
+			summary = "친구들과 생일 파티를 열었습니다. 친구 인연 +14, 매력 +3."
+		"book_buy":
+			stats["지식"] = mini(100, int(stats["지식"]) + 5)
+			skill_xp["학문"] = int(skill_xp["학문"]) + 10
+			summary = "낡은 천문책에서 새로운 별자리를 읽었습니다. 지식 +5."
+		"book_sell":
 			gold += 35
-			stats["매력"] = mini(100, int(stats["매력"]) + 2)
-			stats["도덕"] = mini(100, int(stats["도덕"]) + 1)
-			event_text = "친구들을 초대해 작은 생일 파티를 열었습니다. 선물과 축하 인사가 이어졌습니다."
-	var scene_path := "res://assets/events/%s.svg" % scene_name
-	if ResourceLoader.exists(scene_path):
-		event_art.texture = load(scene_path) as Texture2D
-	else:
-		var birthday_path := "res://assets/events/birthday.svg"
-		event_art.texture = load(birthday_path) as Texture2D if ResourceLoader.exists(birthday_path) else load("res://assets/harin.svg") as Texture2D
-	event_caption.text = "%d살 생일 · %s\n%s" % [age, zodiac.get("name", "별빛"), event_text]
-	_add_log("%d살 생일 · %s" % [age, event_text])
+			_add_log("책을 팔아 35 G를 벌었습니다. 당장 돈은 생겼지만 아쉬움이 남습니다.")
+			summary = "책을 팔았습니다. 금화 +35 G."
+		"deer_heal":
+			family_bond = mini(100, family_bond + 8)
+			stats["도덕"] = mini(100, int(stats["도덕"]) + 4)
+			keepsakes.append("별사슴의 은빛 털")
+			summary = "별사슴을 치료해 주었습니다. 도덕 +4, 기념품을 얻었습니다."
+		"deer_leave":
+			stats["건강"] = mini(100, int(stats["건강"]) + 3)
+			summary = "약초를 남기고 조용히 물러났습니다. 건강 +3."
+		"festival_contest":
+			var contest_score := int(stats["예술"]) + _skill_rank("예술") * 4
+			if contest_score >= 45 + int(month_index / 12) * 2:
+				gold += 100
+				reputation = mini(100, reputation + 10)
+				keepsakes.append("마을 축제 리본")
+				summary = "작품이 축제에서 입상했습니다! 상금 100 G와 명성 +10."
+			else:
+				stats["예술"] = mini(100, int(stats["예술"]) + 2)
+				summary = "입상은 놓쳤지만 관객의 조언을 얻었습니다. 예술 +2."
+		"festival_friends":
+			friendship = mini(100, friendship + 10)
+			stats["스트레스"] = maxi(0, int(stats["스트레스"]) - 8)
+			summary = "축제에서 친구들과 즐거운 추억을 만들었습니다. 친구 인연 +10."
+		"deer_give_herb":
+			skill_xp["약초"] = int(skill_xp["약초"]) + 15
+			stats["도덕"] = mini(100, int(stats["도덕"]) + 3)
+			summary = "약초를 나눠주고 약초 숙련을 쌓았습니다. 도덕 +3."
+		"deer_keep_herb":
+			gold += 25
+			stats["도덕"] = maxi(0, int(stats["도덕"]) - 3)
+			summary = "약초를 팔아 25 G를 얻었지만 마음이 조금 무겁습니다. 도덕 -3."
+		"competition":
+			var field := String(choice.get("field", "체력"))
+			var related_skill := String(choice.get("skill", "검술"))
+			var score := int(stats.get(field, 0)) + _skill_rank(related_skill) * 4 + int(fortune_number / 2)
+			var target := 42 + int(month_index / 12) * 3
+			if score >= target:
+				gold += 90 + int(month_index / 12) * 8
+				reputation = mini(100, reputation + 12)
+				keepsakes.append("%s 대회 트로피" % field)
+				summary = "%s 대회 우승! 상금과 명성, 트로피를 얻었습니다." % field
+			else:
+				stats["스트레스"] = mini(100, int(stats["스트레스"]) + 8)
+				summary = "%s 대회에서 경험을 쌓았습니다. 다음에는 관련 훈련을 해보세요." % field
+		"competition_skip":
+			summary = "이번 대회는 쉬기로 했습니다. 다음 계절에 다시 도전할 수 있습니다."
+	for child in choice_container.get_children():
+		child.queue_free()
+	event_pending = false
+	event_caption.text += "\n" + summary
+	_add_log(summary)
+	_refresh()
+
+func _trigger_competition() -> void:
+	var age := 10 + int(month_index / 12)
+	_present_choices("계절 대회가 열렸습니다. 참가비 20 G. 잘 단련한 분야를 골라 도전하세요! (현재 나이 %d살)" % age, "festival", [
+		{"label": "검술 시합 · 체력과 검술 숙련", "kind": "competition", "field": "체력", "skill": "검술", "cost": 20},
+		{"label": "미술 경연 · 예술과 예술 숙련", "kind": "competition", "field": "예술", "skill": "예술", "cost": 20},
+		{"label": "마법 문답 · 마력과 학문 숙련", "kind": "competition", "field": "마력", "skill": "학문", "cost": 20},
+		{"label": "대회는 건너뛴다", "kind": "competition_skip"}
+	])
+
+func _random_event() -> void:
+	var event_index := randi_range(0, 2)
+	match event_index:
+		0:
+			_present_choices("마을 축제입니다. 올해의 화관을 뽑는 작은 경연이 열렸어요.", "festival", [
+				{"label": "화관 경연에 참가한다 · 참가비 10 G", "kind": "festival_contest", "cost": 10},
+				{"label": "친구들과 축제를 즐긴다", "kind": "festival_friends"}
+			])
+		1:
+			_present_choices("책방에서 오래된 천문책을 발견했습니다. 어떻게 할까요?", "book", [
+				{"label": "책을 사서 공부한다 · 20 G", "kind": "book_buy", "cost": 20},
+				{"label": "책을 팔아 용돈을 마련한다", "kind": "book_sell"}
+			])
+		2:
+			_present_choices("다친 별사슴이 약초밭에 숨어 있습니다. 가진 것을 나눌까요?", "farm", [
+				{"label": "약초를 나눠 치료한다", "kind": "deer_give_herb"},
+				{"label": "약초를 챙겨 집으로 돌아간다", "kind": "deer_keep_herb"}
+			])
 
 func _apply_action(action_key: String) -> void:
+	var rank := _skill_rank(_skill_for_action(action_key))
 	match action_key:
 		"academy":
-			stats["지식"] += 3
-			stats["마력"] += 2
+			stats["지식"] += 3 + rank
+			stats["마력"] += 2 + int(rank / 2)
 			stats["스트레스"] += 8
 		"atelier":
-			stats["예술"] += 3
-			stats["매력"] += 2
+			stats["예술"] += 3 + rank
+			stats["매력"] += 2 + int(rank / 2)
 			stats["스트레스"] += 6
 		"training":
-			stats["체력"] += 3
+			stats["체력"] += 3 + rank
 			stats["건강"] += 1
 			stats["스트레스"] += 5
 		"cafe":
-			gold += 105
+			gold += 105 + rank * 10
 			stats["매력"] += 2
 			stats["스트레스"] += 4
+			reputation += 1
 		"farm":
-			gold += 80
+			gold += 80 + rank * 8
 			stats["체력"] += 1
 			stats["도덕"] += 1
 			stats["스트레스"] += 3
 		"shop":
-			gold += 95
+			gold += 95 + rank * 9
 			stats["매력"] += 2
 			stats["도덕"] += 1
 			stats["스트레스"] += 3
+			reputation += 1
 		"adventure":
 			_resolve_adventure()
 		"rest":
 			stats["건강"] += 10
 			stats["스트레스"] -= 14
 			stats["매력"] += 1
+			family_bond += 4
 		"friends":
 			stats["스트레스"] -= 9
 			stats["매력"] += 2
 			stats["도덕"] += 1
+			friendship += 6
+	family_bond = clampi(family_bond, 0, 100)
+	friendship = clampi(friendship, 0, 100)
 	for key in ["건강", "체력", "지식", "마력", "예술", "매력", "도덕"]:
 		stats[key] = clampi(int(stats[key]), 0, 100)
 
@@ -568,7 +754,7 @@ func _resolve_dungeon() -> void:
 	var knowledge_power := int(stats["지식"]) / 2
 	var magic_power := int(stats["마력"])
 	var fortune_power := fortune_number if floor_number % 3 == 0 else 0
-	var total_power := knowledge_power + magic_power + fortune_power
+	var total_power := knowledge_power + magic_power + fortune_power + _skill_rank("탐험") * 2
 	_add_log("별의 탑 %d층 · 지식 %d + 마력 %d + 운세 %d = 탐험력 %d / 봉인 난이도 %d" % [floor_number, knowledge_power, magic_power, fortune_power, total_power, challenge])
 	if total_power >= challenge:
 		var reward := 40 + floor_number * 20 + randi_range(0, 20)
@@ -587,34 +773,6 @@ func _resolve_dungeon() -> void:
 		stats["스트레스"] += 9
 		_add_log("봉인이 너무 강해 물러났습니다. 건강 -%d, 스트레스 +9. 학원에서 지식과 마력을 더 키워보세요." % injury)
 
-func _random_event() -> void:
-	var event_index: int = randi_range(0, 3)
-	var event_text := ""
-	var scene_name := "festival"
-	match event_index:
-		0:
-			stats["매력"] += 2
-			event_text = "마을 축제에서 친구를 사귀고 자신감을 얻었습니다. 매력 +2."
-		1:
-			stats["지식"] += 2
-			scene_name = "book"
-			event_text = "오래된 천문책을 발견했습니다. 지식 +2."
-		2:
-			gold += 35
-			scene_name = "letter"
-			event_text = "정원 우편함에 후원금 35 G가 도착했습니다."
-		3:
-			stats["스트레스"] += 5
-			scene_name = "rain"
-			event_text = "예상치 못한 비가 내려 일정이 힘들었습니다. 스트레스 +5."
-	_add_log(event_text)
-	event_caption.text = "뜻밖의 사건\n%s" % event_text
-	var scene_path := "res://assets/events/%s.svg" % scene_name
-	if ResourceLoader.exists(scene_path):
-		event_art.texture = load(scene_path) as Texture2D
-	else:
-		event_art.texture = load("res://assets/events/festival.svg") as Texture2D if ResourceLoader.exists("res://assets/events/festival.svg") else load("res://assets/harin.svg") as Texture2D
-
 func _show_ending() -> void:
 	var profession := "마법사"
 	var best_score: int = int(stats["마력"])
@@ -630,6 +788,10 @@ func _show_ending() -> void:
 		profession = "별빛 외교관"
 	if dungeon_floor >= 9 and stardust >= 5:
 		profession = "별의 수호자"
+	if reputation >= 50:
+		profession = "왕도 최고의 명사"
+	if friendship >= 75 and family_bond >= 75:
+		profession = "사랑받는 별빛 아이"
 	var ending_text := "%s은(는) %s이(가) 되었습니다. 함께 보낸 8년은 두 사람의 마음속에 오래 빛날 거예요." % [player_name, profession]
 	ending_panel.add_child(_label("열여덟 살, 새로운 계절", 20, Color("f4d99a")))
 	ending_panel.add_child(_label(ending_text, 16, Color("e5e6f0")))
@@ -641,7 +803,7 @@ func save_game() -> void:
 	if file == null:
 		_add_log("저장 파일을 만들지 못했습니다.")
 		return
-	file.store_string(JSON.stringify({"player_name": player_name, "birth_year": birth_year, "birth_month": birth_month, "birth_day": birth_day, "zodiac": zodiac, "fortune_number": fortune_number, "dungeon_floor": dungeon_floor, "stardust": stardust, "month_index": month_index, "day_of_month": day_of_month, "selected_week": selected_week, "week_tasks": week_tasks, "selected_action": selected_action, "gold": gold, "stats": stats, "log_lines": log_lines}))
+	file.store_string(JSON.stringify({"player_name": player_name, "birth_year": birth_year, "birth_month": birth_month, "birth_day": birth_day, "zodiac": zodiac, "fortune_number": fortune_number, "dungeon_floor": dungeon_floor, "stardust": stardust, "month_index": month_index, "day_of_month": day_of_month, "selected_week": selected_week, "week_tasks": week_tasks, "selected_action": selected_action, "gold": gold, "stats": stats, "fatigue": fatigue, "family_bond": family_bond, "friendship": friendship, "reputation": reputation, "skill_xp": skill_xp, "keepsakes": keepsakes, "log_lines": log_lines}))
 	_add_log("현재 정원을 저장했습니다.")
 	_refresh()
 
@@ -677,6 +839,16 @@ func load_game() -> void:
 				week_tasks[index] = task_name
 	selected_action = week_tasks[selected_week]
 	gold = maxi(0, int(saved.get("gold", 420)))
+	fatigue = clampi(int(saved.get("fatigue", 18)), 0, 100)
+	family_bond = clampi(int(saved.get("family_bond", 40)), 0, 100)
+	friendship = clampi(int(saved.get("friendship", 12)), 0, 100)
+	reputation = clampi(int(saved.get("reputation", 0)), 0, 100)
+	var saved_skills: Variant = saved.get("skill_xp", skill_xp)
+	if typeof(saved_skills) == TYPE_DICTIONARY:
+		skill_xp = saved_skills
+	var saved_keepsakes: Variant = saved.get("keepsakes", keepsakes)
+	if typeof(saved_keepsakes) == TYPE_ARRAY:
+		keepsakes.assign(saved_keepsakes)
 	var saved_stats: Variant = saved.get("stats", stats)
 	if typeof(saved_stats) == TYPE_DICTIONARY:
 		stats = saved_stats
@@ -707,7 +879,7 @@ func _refresh() -> void:
 		profile_summary_label.text = "%s\n%s · 행운 %d" % [player_name, String(zodiac.get("name", "별자리 미상")), fortune_number]
 	var dungeon_hint := find_child("DungeonHint", true, false) as Label
 	if dungeon_hint:
-		dungeon_hint.text = "던전 층 %d · 별가루 %d\n탐험력: 지식 %d + 마력 %d" % [dungeon_floor, stardust, int(stats["지식"]) / 2, int(stats["마력"])]
+		dungeon_hint.text = "던전 층 %d · 별가루 %d\n탐험력: 지식 %d + 마력 %d + 탐험숙련 %d" % [dungeon_floor, stardust, int(stats["지식"]) / 2, int(stats["마력"]), _skill_rank("탐험") * 2]
 	var week_lines: PackedStringArray = []
 	for index in range(WEEKS_PER_MONTH):
 		week_lines.append("%d주 %s" % [index + 1, ACTIONS[week_tasks[index]].title])
@@ -718,6 +890,11 @@ func _refresh() -> void:
 	daily_button.text = "하루 진행 · %d일 →" % day_of_month
 	for key in stat_labels:
 		stat_labels[key].text = "%s  %d" % [key, int(stats[key])]
+	condition_label.text = "컨디션 %d  · 피로 %d%s" % [100 - fatigue, fatigue, "  · 휴식 권장" if fatigue >= 65 else ""]
+	condition_label.add_theme_color_override("font_color", Color("e5968d") if fatigue >= 75 else Color("e9ce83") if fatigue >= 55 else Color("9ed2bc"))
+	bond_label.text = "가족애 %d  · 친구 인연 %d  · 명성 %d" % [family_bond, friendship, reputation]
+	skill_label.text = "숙련  학문 %d · 예술 %d · 검술 %d" % [_skill_rank("학문"), _skill_rank("예술"), _skill_rank("검술")]
+	keepsake_button.text = "성장 기록 · 기념품 %d개" % keepsakes.size()
 	for key in action_buttons:
 		var button: Button = action_buttons[key]
 		button.modulate = Color("f2d795") if key == selected_action else Color.WHITE
@@ -725,6 +902,8 @@ func _refresh() -> void:
 	if month_index >= 96:
 		selected_label.text = "%s의 성장이 끝났습니다. 저장된 기록을 언제든 다시 볼 수 있습니다." % player_name
 		daily_button.disabled = true
+	else:
+		daily_button.disabled = event_pending
 
 func _label(text: String, font_size: int, color: Color) -> Label:
 	var label := Label.new()
